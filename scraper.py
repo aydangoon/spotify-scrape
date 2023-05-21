@@ -11,7 +11,7 @@ from backoff_policy import BackoffPolicy
 from batch_artists_req_builder import BatchArtistsReqBuilder
 
 NUM_WORKERS = 1
-MAX_API_REQUESTS = 2
+MAX_API_REQUESTS = 1
 
 class Scraper:
     def __init__(self, seed: List[str], session: aiohttp.ClientSession):
@@ -138,7 +138,7 @@ class Scraper:
 
             # are we missing data about the artist?
             if genres is None or popularity is None or name is None:
-                print("Missing data for artist:", artist_id, "adding to batch request")
+                # print("Missing data for artist:", artist_id, "adding to batch request")
                 await self._batch_artist_req_builder.add(artist_id)
                 is_full = await self._batch_artist_req_builder.is_full()
                 if is_full:
@@ -180,8 +180,13 @@ async def main():
     MAX_NUM_ARTISTS = args.max_num_artists or 100
     print(f"Debug mode: {DEBUG}")
 
+    # Seeds for testing
+    SEVERAL_ARTISTS = '/artists?ids=2CIMQHirSU0MQqyYHq0eOx,57dN52uHvrHOxijzpIgu3E,1vCWHaC5f2uS3yhpwWbIA6'
+    RELATED_ARTISTS = '/artists/0TnOYISbd1XYRBk9myaseg/related-artists'
+
+
     async with aiohttp.ClientSession() as session:
-        scraper = Scraper(seed=[sc.STATIC_PATHS['genre_seeds']], session=session)
+        scraper = Scraper(seed=[RELATED_ARTISTS], session=session)
         await scraper.run() 
 
 if __name__ == "__main__":
