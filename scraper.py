@@ -1,4 +1,5 @@
 from typing import List
+import traceback
 import argparse
 import asyncio
 import aiohttp
@@ -7,8 +8,10 @@ import spotify_client as sc
 from cache import Cache
 from artists_writer import ArtistsWriter
 from backoff_policy import BackoffPolicy
+from batch_artists_req_builder import BatchArtistsReqBuilder
 
 NUM_WORKERS = 1
+MAX_API_REQUESTS = 2
 
 class Scraper:
     def __init__(self, seed: List[str], session: aiohttp.ClientSession):
@@ -20,7 +23,9 @@ class Scraper:
         self._queue = asyncio.Queue()
         self._seed = seed
         self._total = 0
-        self._worker_id = 0
+        self._api_requests = 0
+
+        self._batch_artist_req_builder = BatchArtistsReqBuilder()
 
 
     async def run(self):
@@ -50,11 +55,14 @@ class Scraper:
     async def process_one(self):
         endpoint = await self._queue.get()
         try:
-            await self.process_endpoint(endpoint)
+            if self._api_requests < MAX_API_REQUESTS:
+                self._api_requests += 1
+                await self.process_endpoint(endpoint)
         except Exception as e:
             # TODO: retry handling i.e. requeue the endpoint in cases of
             # rate limit, connection error, etc.
-            print(f'Error processing endpoint {endpoint}: {e.with_traceback().print_stack()}')
+            print(f'Error processing endpoint {endpoint}: {e}')
+            traceback.print_exc()
         finally:
             self._queue.task_done()
     
@@ -96,16 +104,66 @@ class Scraper:
         else: # success
             await self.process_valid_endpoint(endpoint, res['data'])
             # add to cache
-            await self._cache.set(endpoint, b'1')
+            # await self._cache.set(endpoint, b'1')
     
     async def process_valid_endpoint(self, endpoint, data):
-        if endpoint.startswith('/artists/'):
-            await self._artists_writer.add(
-                id=data['id'],
-                name=data['name'],
-                genres=data['genres'],
-                popularity=data['popularity']
-            )
+        if endpoint.startswith(sc.STATIC_PATHS['genre_seeds']):
+            print('Processing genre seeds...')
+            await self.process_genres(data['genres'])
+        elif endpoint.startswith(sc.STATIC_PATHS['recommendations']):
+            print('Processing recommendations...')
+            await self.process_artists([artist for track in data['tracks'] for artist in track["artists"]])
+            await self.process_albums([album for track in data['tracks'] for album in track["album"]])
+        elif endpoint.startswith(sc.STATIC_PATHS['artists']):
+            print('Processing artists...')
+            await self.process_artists(data['artists'])
+        elif endpoint.startswith(sc.STATIC_PATHS['albums']):
+            print('Processing albums...')
+            await self.process_albums(data['albums'])
+        elif endpoint.startswith(sc.STATIC_PATHS['artist_related_artists']):
+            print('Processing related artists...')
+            await self.process_artists(data['artists'])
+    
+    async def process_artists(self, artists):
+        for artist in artists:
+            artist_id = artist.get('id')
+            genres = artist.get('genres')
+            popularity = artist.get('popularity')
+            name = artist.get('name')
+            if artist_id is None or self._total >= MAX_NUM_ARTISTS:
+                return
+            print('processing artist:', artist_id)
+            if await self._cache.exists(artist_id):
+                continue
+
+            # are we missing data about the artist?
+            if genres is None or popularity is None or name is None:
+                print("Missing data for artist:", artist_id, "adding to batch request")
+                await self._batch_artist_req_builder.add(artist_id)
+                is_full = await self._batch_artist_req_builder.is_full()
+                if is_full:
+                    print("Batch request is full, enqueing batch request...")
+                    ids = await self._batch_artist_req_builder.build()
+                    await self._queue.put(f"/artists?ids={ids}")
+            else:
+                await self._artists_writer.add(id=artist_id, name=name, popularity=popularity, genres=genres)
+                await self._cache.set(artist_id, b'1')
+                self._total += 1
+                # enqueue related artists
+                await self._queue.put(f"/artists/{artist_id}/related-artists")
+                # enqueue artist's genres
+                await self.process_genres(genres)
+    
+    async def process_genres(self, genres):
+        for genre in genres:
+            if await self._cache.exists(genre):
+                continue
+            await self._queue.put(f"/recommendations?seed_genres={genre}")
+            await self._cache.set(genre, b'1')
+    
+    async def process_albums(self, albums):
+        pass
+        
 
 
 
@@ -123,8 +181,8 @@ async def main():
     print(f"Debug mode: {DEBUG}")
 
     async with aiohttp.ClientSession() as session:
-        scraper = Scraper(seed=['/artists/1oPRcJUkloHaRLYx0olBLJ'], session=session)
+        scraper = Scraper(seed=[sc.STATIC_PATHS['genre_seeds']], session=session)
         await scraper.run() 
 
 if __name__ == "__main__":
-    asyncio.run(main(), debug=True)
+    asyncio.run(main())

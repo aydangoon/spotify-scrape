@@ -8,6 +8,7 @@ class Cache:
             self._lock = asyncio.Lock()
             if fresh:
                 self.cache.flushall()
+                print("[Cache]: cleared cache")
         except redis.exceptions.ConnectionError:
             print("[Cache]: Redis Server is not running on port 6379.")
             exit(1)
@@ -18,12 +19,14 @@ class Cache:
     
     async def set(self, key, value):
         async with self._lock:
-            print("[Cache]: Setting key:", key)
             return self.cache.set(key, value)
         
     async def exists(self, key):
         async with self._lock:
-            return self.cache.exists(key)
+            exists = self.cache.exists(key) == 1
+            if exists:
+                print("[Cache]: hit", key)
+            return exists
 
     async def close(self):
         async with self._lock:
