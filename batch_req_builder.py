@@ -10,7 +10,6 @@ class BatchReqBuilder:
     async def add(self, elt_id):
         async with self._lock:
             if elt_id in self._ids:
-                print('duplicate id:', elt_id)
                 return
             self._ids.add(elt_id)
             self._num_ids += 1

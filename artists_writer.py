@@ -1,11 +1,11 @@
-from typing import Dict, Tuple, List
+from typing import Dict, List
 import asyncio
 
 class ArtistsWriter:
     def __init__(self, fresh: bool):
         self.artists: Dict[str, List[str, int, List[str]]] = {}
         self._lock = asyncio.Lock()
-        self._LIMIT = 10
+        self._LIMIT = 100
         self._FILENAME = 'artists.csv'
 
         # prep file

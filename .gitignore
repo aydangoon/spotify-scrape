@@ -1,5 +1,6 @@
 # output
 artists.csv
+__pycache__/
 
 # API key
 key.json
