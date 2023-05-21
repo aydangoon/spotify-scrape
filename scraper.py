@@ -8,7 +8,7 @@ import spotify_client as sc
 from cache import Cache
 from artists_writer import ArtistsWriter
 from backoff_policy import BackoffPolicy
-from batch_artists_req_builder import BatchArtistsReqBuilder
+from batch_req_builder import BatchReqBuilder
 
 NUM_WORKERS = 1
 MAX_API_REQUESTS = 1
@@ -25,7 +25,7 @@ class Scraper:
         self._total = 0
         self._api_requests = 0
 
-        self._batch_artist_req_builder = BatchArtistsReqBuilder()
+        self._batch_artist_req_builder = BatchReqBuilder(size=50)
 
 
     async def run(self):
@@ -123,6 +123,18 @@ class Scraper:
         elif endpoint.startswith(sc.STATIC_PATHS['artist_related_artists']):
             print('Processing related artists...')
             await self.process_artists(data['artists'])
+        # TODO: categories and playlists
+
+    async def process_genres(self, genres):
+        for genre in genres:
+            if await self._cache.exists(genre):
+                continue
+            await self._queue.put(f"/recommendations?seed_genres={genre}")
+            await self._cache.set(genre, b'1')
+    
+    async def process_albums(self, albums):
+        artists = [artist for album in albums for artist in album['artists']]
+        await self.process_artists(artists)
     
     async def process_artists(self, artists):
         for artist in artists:
@@ -138,7 +150,7 @@ class Scraper:
 
             # are we missing data about the artist?
             if genres is None or popularity is None or name is None:
-                # print("Missing data for artist:", artist_id, "adding to batch request")
+                print("Missing data for artist:", artist_id, "adding to batch request")
                 await self._batch_artist_req_builder.add(artist_id)
                 is_full = await self._batch_artist_req_builder.is_full()
                 if is_full:
@@ -154,15 +166,6 @@ class Scraper:
                 # enqueue artist's genres
                 await self.process_genres(genres)
     
-    async def process_genres(self, genres):
-        for genre in genres:
-            if await self._cache.exists(genre):
-                continue
-            await self._queue.put(f"/recommendations?seed_genres={genre}")
-            await self._cache.set(genre, b'1')
-    
-    async def process_albums(self, albums):
-        pass
         
 
 
@@ -183,10 +186,11 @@ async def main():
     # Seeds for testing
     SEVERAL_ARTISTS = '/artists?ids=2CIMQHirSU0MQqyYHq0eOx,57dN52uHvrHOxijzpIgu3E,1vCWHaC5f2uS3yhpwWbIA6'
     RELATED_ARTISTS = '/artists/0TnOYISbd1XYRBk9myaseg/related-artists'
+    SEVERAL_ALBUMS = '/albums?ids=382ObEPsp2rxGrnsizN5TX,1A2GTWGtFfWp7KSQTwWOyo,2noRn2Aes5aoNVsU6iWThc'
 
 
     async with aiohttp.ClientSession() as session:
-        scraper = Scraper(seed=[RELATED_ARTISTS], session=session)
+        scraper = Scraper(seed=[SEVERAL_ALBUMS], session=session)
         await scraper.run() 
 
 if __name__ == "__main__":
