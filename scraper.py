@@ -5,20 +5,20 @@ import argparse
 import asyncio
 import aiohttp
 import redis.asyncio as redis
-import spotify_client as sc
 from cache import Cache
 from artists_writer import ArtistsWriter
 from backoff_policy import BackoffPolicy
 from batch_req_builder import BatchReqBuilder
+from spotify_client import SpotifyClient, BASE, STATIC_PATHS, STATUS_CODES
 
-RATE_LIMIIT_SAFETY = 5 # temp. if we get this number of 429s, just stop
+RATE_LIMIIT_SAFETY = 1 # temp. if we get this number of 429s, just stop
 
 class Scraper:
     def __init__(self, seed: List[str], session: aiohttp.ClientSession):
         self._cache = Cache(fresh=FRESH)
-        self._backoff_policy = BackoffPolicy(cap=10)
+        self._backoff_policy = BackoffPolicy()
         self._artists_writer = ArtistsWriter(fresh=FRESH)
-        self._session = session
+        self._sc = SpotifyClient(session)
 
         self._queue = asyncio.Queue()
         self._seed = seed
@@ -29,7 +29,7 @@ class Scraper:
 
 
     async def run(self):
-        await sc.initialize(self._session)
+        await self._sc.refresh_access_token()
         for endpoint in self._seed:
             await self._queue.put(endpoint)
 
@@ -68,7 +68,7 @@ class Scraper:
     
     async def process_endpoint(self, endpoint):
 
-        print('Processing:', endpoint)
+        # print('Processing:', endpoint)
 
         if self._rate_limit_hits >= RATE_LIMIIT_SAFETY:
             print('[Rate Limit]: safety hit. Stopping...')
@@ -81,10 +81,8 @@ class Scraper:
             await asyncio.sleep(wait_sec)
         
         # attempt to fetch
-        headers = {
-            'Authorization': f"Bearer {sc.ACCESS_TOKEN}"
-        }
-        res = await sc.fetch(session=self._session, url=sc.BASE+endpoint, method='GET', data=None, headers=headers)
+        headers = {'Authorization': f"Bearer {self._sc.access_token}"}
+        res = await self._sc.fetch(url=BASE+endpoint, method='GET', data=None, headers=headers)
 
         print(f'Response: {"XXX" if res is None else res["status"]} | Endpoint: {endpoint}')
 
@@ -92,37 +90,37 @@ class Scraper:
         if res is None: # connection or other severe error
             # TODO: better handling? do we just requeue?
             await self._queue.put(endpoint)
-        elif res['status'] == 429: # rate limit
+        elif res['status'] == STATUS_CODES['RATE_LIMITED']:
             print('[Rate Limit]: warning')
             self._rate_limit_hits += 1
             retry_after = res['data']['retry_after']
-            self._backoff_policy.set_retry_after(retry_after)
-            self._backoff_policy.incr_attempts()
+            await self._backoff_policy.set_retry_after(retry_after)
+            await self._backoff_policy.incr_attempts()
             await self._queue.put(endpoint)
-        elif res['status'] != 200: # other error handling
-            if res['status'] == 401:
-                print('Need to refresh access token')
-            elif res['status'] == 403:
-                print('Bad OAuth token')
+        elif res['status'] == STATUS_CODES['OLD_ACCESS_TOKEN']:
+            print("Refreshing access token...")
+            await self._sc.refresh_access_token()
             await self._queue.put(endpoint)
+        elif res['status'] == STATUS_CODES['BAD_OAUTH']:
+            print('Bad OAuth token')
         else: # success
             await self.process_valid_endpoint(endpoint, res['data'])
     
     async def process_valid_endpoint(self, endpoint, data):
-        if endpoint.startswith(sc.STATIC_PATHS['genre_seeds']):
+        if endpoint.startswith(STATIC_PATHS['genre_seeds']):
             #print('Processing genre seeds...')
             await self.process_genres(data['genres'])
-        elif endpoint.startswith(sc.STATIC_PATHS['recommendations']):
+        elif endpoint.startswith(STATIC_PATHS['recommendations']):
             #print('Processing recommendations...')
             await self.process_artists([artist for track in data['tracks'] for artist in track["artists"]])
             await self.process_albums([track['album'] for track in data['tracks']])
-        elif endpoint.startswith(sc.STATIC_PATHS['artists']):
+        elif endpoint.startswith(STATIC_PATHS['artists']):
             #print('Processing artists...')
             await self.process_artists(data['artists'])
-        elif endpoint.startswith(sc.STATIC_PATHS['albums']):
+        elif endpoint.startswith(STATIC_PATHS['albums']):
             #print('Processing albums...')
             await self.process_albums(data['albums'])
-        elif endpoint.startswith(sc.STATIC_PATHS['artist_related_artists']):
+        elif endpoint.startswith(STATIC_PATHS['artist_related_artists']):
             #print('Processing related artists...')
             await self.process_artists(data['artists'])
         # TODO: categories and playlists
@@ -146,9 +144,6 @@ class Scraper:
         print(f'processing {len(artists)} artists')
         for artist in artists:
             artist_id = artist.get('id')
-            genres = artist.get('genres')
-            popularity = artist.get('popularity')
-            name = artist.get('name')
             if artist_id is None: 
                 return
             if self._total >= MAX_NUM_ARTISTS:
@@ -156,21 +151,20 @@ class Scraper:
                 return
 
             print('processing artist:', artist_id)
-            if await self._cache.exists(artist_id):
-                continue
 
+            genres, popularity, name = artist.get('genres'), artist.get('popularity'), artist.get('name')
+            cache_val = await self._cache.get(artist_id)
             # are we missing data about the artist?
-            if genres is None or popularity is None or name is None:
-                # print("Missing data for artist:", artist_id, "adding to batch request")
+            if cache_val is None and (genres is None or popularity is None or name is None):
+                await self._cache.set(artist_id, 1)
                 await self._batch_artist_req_builder.add(artist_id)
-                is_full = await self._batch_artist_req_builder.is_full()
-                if is_full:
+                if await self._batch_artist_req_builder.is_full():
                     print("Batch request is full, enqueing batch request...")
                     ids = await self._batch_artist_req_builder.build()
                     await self._queue.put(f"/artists?ids={ids}")
-            else:
+            elif cache_val is None or cache_val == 1:
                 await self._artists_writer.add(id=artist_id, name=name, popularity=popularity, genres=genres)
-                await self._cache.set(artist_id, b'1')
+                await self._cache.set(artist_id, 2)
                 self._total += 1
                 # enqueue related artists
                 await self._queue.put(f"/artists/{artist_id}/related-artists")
