@@ -21,7 +21,6 @@ class ArtistsWriter:
     async def add(self, id: str, name: str, popularity: int, genres: List[str]):
         async with self._lock:
             self.artists[id] = [name, popularity, genres]
-            print('added artist:', self.artists[id])
             if len(self.artists) >= self._LIMIT:
                 await self._write_to_file()
                 self.artists.clear()

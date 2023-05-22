@@ -27,9 +27,9 @@ class SpotifyClient:
             self._client_id = data['client_id']
             self._client_secret = data['client_secret']
 
-    async def fetch(self, url, method, data, headers):
+    async def fetch(self, url, method, data, headers, params=None):
         try: 
-            async with self._session.request(method, url, data=data, headers=headers) as response:
+            async with self._session.request(method, url, data=data, headers=headers, params=params) as response:
                 status = response.status
                 data = {} if response.content_type != 'application/json' else await response.json()
                 if status != STATUS_CODES['OK']:

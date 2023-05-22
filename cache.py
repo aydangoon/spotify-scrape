@@ -23,10 +23,7 @@ class Cache:
         
     async def exists(self, key):
         async with self._lock:
-            exists = self.cache.exists(key) == 1
-            if exists:
-                print("[Cache]: hit", key)
-            return exists
+            return self.cache.exists(key) == 1
 
     async def close(self):
         async with self._lock:
