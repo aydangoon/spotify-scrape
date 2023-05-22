@@ -54,13 +54,15 @@ class Scraper:
         for key, val in self._route_data.items():
             print("======================================================")
             print(key+":")
-            print(f"\tTotal Time: {val['time']}")
             time_per_call = "N/A" if val['calls'] == 0 else val['time']/val['calls']
+            info_per_call = "N/A" if val['calls'] == 0 else (val['added'] + 0.5*val['batched'])/val['calls']
+            info_per_sec = "N/A" if time_per_call == 0 or time_per_call == "N/A" or info_per_call=="N/A" else info_per_call/time_per_call
+            score = "N/A" if val['calls'] == 0 or val['time'] == 0 else (val['added'] + 0.5*val['batched'])/(val['time']*val['calls'])
+            print(f"\tTotal Time: {val['time']}")
             print(f"\tTime per call: {time_per_call}")
-            added_per_sec = "N/A" if val['time'] == 0 else val['added']/val['time']
-            print(f"\tAdded per second: {added_per_sec}")
-            batched_per_sec = "N/A" if val['time'] == 0 else val['batched']/val['time']
-            print(f"\tBatched per second: {batched_per_sec}")
+            print(f"\tInfo per call: {info_per_call}")
+            print(f"\tInfo per second: {info_per_sec}")
+            print(f"\tScore: {score}")
             print("======================================================")
 
     async def worker(self):
