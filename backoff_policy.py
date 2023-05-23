@@ -24,6 +24,4 @@ class BackoffPolicy:
             if self._attempts == 0:
                 return 0
             jitter = uniform(0, min(self._cap, self._base * 2 ** (self._attempts-1)))
-            if self._retry_after is not None:
-                return min(self._retry_after, jitter)
-            return jitter
+            return jitter if self._retry_after is None else min(self._retry_after, jitter)

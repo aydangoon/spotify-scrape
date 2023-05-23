@@ -39,11 +39,7 @@ class SpotifyClient:
                     error = data.get('error', { 'message': 'No error message provided'})
                     print(f"Failed to fetch {url}. Error {status}: {error['message']}")
                 if status == STATUS_CODES['RATE_LIMITED']:
-                    print('RAW RESPONSE')
-                    text = await response.text()
-                    print('text:', text)
                     retry_after = response.headers.get('Retry-After')
-                    print('retry_after:', retry_after)
                     if retry_after is not None:
                         data['retry_after'] = float(retry_after)
                 return { 'status': status, 'data': data }
@@ -65,4 +61,3 @@ class SpotifyClient:
         if res is None:
             raise Exception("Failed to refresh access token")
         self.access_token = res['data']['access_token']
-        print('access_token:', self.access_token)

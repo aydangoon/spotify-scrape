@@ -19,16 +19,13 @@ class Scraper:
         self._backoff_policy = BackoffPolicy()
         self._artists_writer = ArtistsWriter(fresh=FRESH)
         self._sc = SpotifyClient(session)
-        # queue for batch artist requests. These take priority over other requests
-        self._primary_queue = asyncio.Queue()
+        self._primary_queue = asyncio.Queue() # for batch artist requests, these take priority over other requests
         self._secondary_queue = asyncio.Queue()
         self._seed = seed
         self._total = 0
         self._rate_limit_hits = 0
         self._batch_artist_req_builder = BatchReqBuilder(size=50)
-
-        # data collection
-        self._path_data = { key: { 'time': 0, 'calls': 0, 'batched': 0, 'added': 0 }for key in PATHS.keys() }
+        self._path_data = { key: { 'time': 0, 'calls': 0, 'batched': 0, 'added': 0 }for key in PATHS.keys() } # data collection
 
     async def run(self):
         await self._sc.refresh_access_token()
@@ -49,19 +46,20 @@ class Scraper:
             w.cancel()
         
         print(f'[Scraper]: finished in {time.time() - start} seconds')
-        print('[Scraper] Path Stats:')
-        for key, val in self._path_data.items():
-            total_time, calls, batched, added = val['time'], val['calls'], val['batched'], val['added']
-            print("======================================================")
-            print(key+":")
-            time_per_call = 0 if calls == 0 else total_time/calls
-            info_per_call = 0 if calls == 0 else (added + 0.5*batched)/calls
-            info_per_sec = 0 if calls == 0 else info_per_call/time_per_call
-            print(f"\tTotal Time: {total_time}")
-            print(f"\tTime per call: {time_per_call}")
-            print(f"\tInfo per call: {info_per_call}")
-            print(f"\tInfo per second: {info_per_sec}")
-            print("======================================================")
+        if DEBUG:
+            print('[Scraper] Path Stats:')
+            for key, val in self._path_data.items():
+                total_time, calls, batched, added = val['time'], val['calls'], val['batched'], val['added']
+                print("======================================================")
+                print(key+":")
+                time_per_call = 0 if calls == 0 else total_time/calls
+                info_per_call = 0 if calls == 0 else (added + 0.5*batched)/calls
+                info_per_sec = 0 if calls == 0 else info_per_call/time_per_call
+                print(f"\tTotal Time: {total_time}")
+                print(f"\tTime per call: {time_per_call}")
+                print(f"\tInfo per call: {info_per_call}")
+                print(f"\tInfo per second: {info_per_sec}")
+                print("======================================================")
 
     async def worker(self):
         while True:
@@ -91,13 +89,13 @@ class Scraper:
     async def process_endpoint(self, endpoint):
 
         if self._rate_limit_hits >= RATE_LIMIIT_SAFETY:
-            print('[Rate Limit]: safety hit. Stopping...')
+            debug('[Rate Limit]: safety hit. Stopping...')
             return
         
         # rate limit
         wait_sec = await self._backoff_policy.get_backoff()
         if wait_sec > 0:
-            print(f'[Rate Limit]: Waiting {wait_sec} seconds...')
+            debug(f'[Rate Limit]: Waiting {wait_sec} seconds...')
             await asyncio.sleep(wait_sec)
         
         # attempt to fetch
@@ -112,27 +110,27 @@ class Scraper:
         )
         call_time = time.time() - start_time
 
-        endpoint_str = endpoint['path'] + "| params: " + str(endpoint['params'])
-        endpoint_str_pretty = endpoint_str[:100]+"..." if len(endpoint_str) > 100 else endpoint_str
-
-        print(f'Response: {"XXX" if res is None else res["status"]} | Endpoint: {endpoint_str_pretty}')
+        if DEBUG:
+            ep_str = endpoint['path'] + "| params: " + str(endpoint['params'])
+            ep_sr_abbrev = ep_str[:100]+"..." if len(ep_str) > 100 else ep_str
+            debug(f'Response: {"XXX" if res is None else res["status"]} | Endpoint: {ep_sr_abbrev}')
 
         # handle response
         if res is None: # connection or other severe error
             await self._secondary_queue.put(endpoint)
         elif res['status'] == STATUS_CODES['RATE_LIMITED']:
-            print('[Rate Limit]: warning')
+            debug('[Rate Limit]: warning')
             self._rate_limit_hits += 1
             retry_after = res['data']['retry_after']
             await self._backoff_policy.set_retry_after(retry_after)
             await self._backoff_policy.incr_attempts()
             await self._secondary_queue.put(endpoint)
         elif res['status'] == STATUS_CODES['OLD_ACCESS_TOKEN']:
-            print("Refreshing access token...")
+            debug("Refreshing access token...")
             await self._sc.refresh_access_token()
             await self._secondary_queue.put(endpoint)
         elif res['status'] == STATUS_CODES['BAD_OAUTH']:
-            print('Bad OAuth token')
+            debug('Bad OAuth token')
         else: # success
             await self.process_data(endpoint, res['data'], call_time)
     
@@ -164,15 +162,12 @@ class Scraper:
             batched += b0
             path = 'albums'
         elif path.startswith(PATHS['category_playlists']):
-            print("Processing category playlists...")
             await self.process_category_playlists(data['playlists'])
             path = 'category_playlists'
         elif path.startswith(PATHS['categories']):
-            print("Processing categories...")
             await self.process_categories(data['categories'])
             path = 'categories'
         elif path.startswith(PATHS['playlist']):
-            print("Processing playlist...")
             [a0, b0] = await self.process_playlist(data)
             added += a0
             batched += b0
@@ -264,7 +259,7 @@ class Scraper:
         return await self.process_artists([artist for album in albums for artist in album.get('artists', [])])
 
     async def process_artists(self, artists):
-        print(f'[PROCESSING]: {len(artists)}')
+        debug(f'[PROCESSING]: {len(artists)}')
         added_artists = 0
         batched_artists = 0
         for artist in artists:
@@ -296,12 +291,16 @@ class Scraper:
                 await self._cache.set(artist_id, b'2')
                 self._total += 1
                 if self._total >= MAX_NUM_ARTISTS:
-                    print('Reached max number of artists. Stopping...')
+                    debug('Reached max number of artists. Stopping...')
                     break
                 await self._secondary_queue.put({ 'path': f"/artists/{artist_id}/related-artists", 'params': None })
                 await self.process_genres(genres, artist_id)
-        print(f'[ADDED]: {added_artists} [BATCHED]: {batched_artists}')
+        debug(f'[ADDED]: {added_artists} [BATCHED]: {batched_artists}')
         return [added_artists, batched_artists]
+
+def debug(s: str):
+    if DEBUG:
+        print(s)
     
 async def main():
     parser = argparse.ArgumentParser()
@@ -313,8 +312,8 @@ async def main():
     global DEBUG, MAX_NUM_ARTISTS, FRESH, NUM_WORKERS
     DEBUG = bool(args.debug)
     FRESH = bool(args.fresh)
-    MAX_NUM_ARTISTS = args.max_num_artists or 100
-    NUM_WORKERS = args.num_workers or 20
+    MAX_NUM_ARTISTS = args.max_num_artists or 11_000_000 # spotify has ~11M artists as of 2023
+    NUM_WORKERS = args.num_workers or 20 # best parallelism found while testing
     print(f"Debug mode: {DEBUG}")
 
     # various seeds for testing
