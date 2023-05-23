@@ -9,7 +9,10 @@ STATIC_PATHS = {
     'recommendations': '/recommendations',
     'albums': '/albums',
     'categories': '/browse/categories',
+    'category_playlists': '/browse/categories/',
+    'playlist': '/playlists/',
     'artist_related_artists': '/artists/',
+    'search': '/search',
 }
 STATUS_CODES = {
     'OK': 200,

@@ -173,11 +173,84 @@ class Scraper:
             added += a0
             batched += b0
             route = 'albums'
-        # TODO: categories and playlists
+        elif path.startswith(STATIC_PATHS['category_playlists']):
+            print("Processing category playlists...")
+            await self.process_category_playlists(data['playlists'])
+            route = 'category_playlists'
+        elif path.startswith(STATIC_PATHS['categories']):
+            print("Processing categories...")
+            await self.process_categories(data['categories'])
+            route = 'categories'
+        elif path.startswith(STATIC_PATHS['playlist']):
+            print("Processing playlist...")
+            [a0, b0] = await self.process_playlist(data)
+            added += a0
+            batched += b0
+            route = 'playlist'
+        elif path.startswith(STATIC_PATHS['search']):
+            [a0, b0] = await self.process_search(data.get('artists', []))
+            added += a0
+            batched += b0
+            route = 'search'
+
         self._route_data[route]['time'] += call_time
         self._route_data[route]['calls'] += 1
         self._route_data[route]['added'] += added
         self._route_data[route]['batched'] += batched
+    
+    async def process_search(self, artists):
+        [a0, b0] = await self.process_artists(artists['items'])
+        if artists.get('next', None) is not None:
+            next_str = artists['next']
+            v1_idx = next_str.index('v1')
+            path = next_str[v1_idx+2:]
+            # print('enqueuing next search', path)
+            await self._secondary_queue.put({ 'path': path, 'params': None })
+        return [a0, b0]
+
+    async def process_playlist(self, playlist):
+        tracks = [item['track'] for item in playlist['items'] if item['track']['type'] == 'track']
+        [a0, b0] = await self.process_artists([artist for track in tracks for artist in track['artists']])
+        [a1, b1] = await self.process_albums([track['album'] for track in tracks])
+        if 'next' in playlist and playlist['next'] is not None:
+            next_str = playlist['next']
+            v1_idx = next_str.index('v1')
+            path = next_str[v1_idx+2:]
+            await self._secondary_queue.put({ 'path': path, 'params': None })
+        return [a0 + a1, b0 + b1]
+
+    async def process_category_playlists(self, playlists):
+        for playlist in playlists['items']:
+            if playlist is None or await self._cache.exists(playlist['id']):
+                continue
+            await self._cache.set(playlist['id'], b'1')
+            await self._secondary_queue.put({ 
+                'path': f"/playlists/{playlist['id']}/tracks", 
+                'params': { 
+                    'limit': 50,
+                    'fields': 'next,items(track(type,album(id),artists(id)))'
+                } 
+            })
+        if 'next' in playlists and playlists['next'] is not None:
+            next_str = playlists['next']
+            v1_idx = next_str.index('v1')
+            path = next_str[v1_idx+2:]
+            await self._secondary_queue.put({ 'path': path, 'params': None })
+
+    async def process_categories(self, categories):
+        for category in categories['items']:
+            if await self._cache.exists(category['id']):
+                continue
+            await self._cache.set(category['id'], b'1')
+            await self._secondary_queue.put({ 
+                'path': f"/browse/categories/{category['id']}/playlists", 
+                'params': { 'limit': 50 } 
+            })
+        if 'next' in categories and categories['next'] is not None:
+            next_str = categories['next']
+            v1_idx = next_str.index('v1')
+            path = next_str[v1_idx+2:]
+            await self._secondary_queue.put({ 'path': path, 'params': None })
 
     async def process_genres(self, genres, artist_id=None):
         for genre in genres:
@@ -187,6 +260,11 @@ class Scraper:
             if artist_id is not None:
                 params['seed_artists'] = artist_id
             await self._secondary_queue.put({ 'path': '/recommendations', 'params': params })
+            await self._secondary_queue.put({ 'path': '/search', 'params': { 
+                'q': 'genre:'+genre,
+                'type': 'artist',
+                'limit': 50 
+            }})
             await self._cache.set(genre, b'1')
     
     async def process_albums(self, albums):
@@ -195,20 +273,9 @@ class Scraper:
                 continue
             await self._cache.set(album['id'], b'1')
         return await self.process_artists([artist for album in albums for artist in album.get('artists', [])])
-    
-    def get_unique_dicts_with_id(self, lst):
-        unique_ids = set()
-        unique_dicts = []
-        
-        for d in lst:
-            if 'id' in d and d['id'] not in unique_ids:
-                unique_ids.add(d['id'])
-                unique_dicts.append(d)
-        
-        return len(unique_dicts)
 
     async def process_artists(self, artists):
-        print(f'processing {len(artists)} artists')
+        print(f'[PROCESSING]: {len(artists)}')
         added_artists = 0
         batched_artists = 0
         for artist in artists:
@@ -231,7 +298,7 @@ class Scraper:
                 batched_artists += 1
                 # print(f'Added {artist_id} to batch request')
                 if await self._batch_artist_req_builder.is_full():
-                    print("Batch request is full, enqueing batch request...")
+                    # print("Batch request is full, enqueing batch request...")
                     await self._primary_queue.put({
                         'path': '/artists',
                         'params': {'ids': await self._batch_artist_req_builder.build()}
@@ -247,7 +314,7 @@ class Scraper:
                     break
                 await self._secondary_queue.put({ 'path': f"/artists/{artist_id}/related-artists", 'params': None })
                 await self.process_genres(genres, artist_id)
-        print(f'added {added_artists} artists, batched {batched_artists} artists')
+        print(f'[ADDED]: {added_artists} [BATCHED]: {batched_artists}')
         return [added_artists, batched_artists]
     
 async def main():
@@ -276,17 +343,21 @@ async def main():
             'ids': '2CIMQHirSU0MQqyYHq0eOx,57dN52uHvrHOxijzpIgu3E,1vCWHaC5f2uS3yhpwWbIA6'
         }
     }
-    RELATED_ARTISTS = '/artists/0TnOYISbd1XYRBk9myaseg/related-artists'
+    RELATED_ARTISTS = { 'path':'/artists/0TnOYISbd1XYRBk9myaseg/related-artists', 'params': None }
     SEVERAL_ALBUMS = {
         'path': '/albums', 
         'params':{
             'ids':'382ObEPsp2rxGrnsizN5TX,1A2GTWGtFfWp7KSQTwWOyo,2noRn2Aes5aoNVsU6iWThc'
         }
     }
-    GENRE_SEEDS = '/recommendations/available-genre-seeds'
+    GENRE_SEEDS = { 'path': '/recommendations/available-genre-seeds', 'params': None }
+    PLAYLIST = { 'path': '/playlists/3cEYpjA9oz9GiPac4AsH4n/tracks', 'params': None }
+    CATEGORY_PLAYLISTS = { 'path' : '/browse/categories/dinner/playlists', 'params': None}
+    CATEGORY = { 'path': '/browse/categories', 'params': None}
+    SEARCH = { 'path': '/search?query=genre%3Arock&type=artist&offset=20&limit=50', 'params': None }
 
     async with aiohttp.ClientSession() as session:
-        scraper = Scraper(seed=[SEVERAL_ARTISTS], session=session)
+        scraper = Scraper(seed=[GENRE_SEEDS, CATEGORY], session=session)
         await scraper.run() 
 
 if __name__ == "__main__":
