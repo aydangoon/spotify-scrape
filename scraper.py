@@ -9,9 +9,12 @@ from cache import Cache
 from artists_writer import ArtistsWriter
 from backoff_policy import BackoffPolicy
 from batch_req_builder import BatchReqBuilder
+from path_queues import PathQueues
 from spotify_client import SpotifyClient, BASE, STATIC_PATHS, STATUS_CODES
 
 RATE_LIMIIT_SAFETY = 5 # temp. if we get this number of 429s, just stop
+SCORE_UPDATE_RATE = 20 # every 20 calls update the priority queue
+FLUSH_RATE = 50 # every 50 calls flush the queue
 
 class Scraper:
     def __init__(self, seed: List[str], session: aiohttp.ClientSession):
@@ -19,31 +22,47 @@ class Scraper:
         self._backoff_policy = BackoffPolicy()
         self._artists_writer = ArtistsWriter(fresh=FRESH)
         self._sc = SpotifyClient(session)
-        # queue for batch artist requests. These take priority over other requests
-        self._primary_queue = asyncio.Queue()
-        # queue for all other requests
-        self._secondary_queue = asyncio.Queue()
         self._seed = seed
         self._total = 0
         self._rate_limit_hits = 0
         self._batch_artist_req_builder = BatchReqBuilder(size=50)
+        self._queue = asyncio.Queue()
+        self._path_queues = PathQueues()
 
         # data collection
-        self._route_data = { key: { 'time': 0, 'calls': 0, 'batched': 0, 'added': 0 }for key in STATIC_PATHS.keys() }
+        self._route_data = { key: { 'time': 0, 'calls': 0, 'batched': 0, 'added': 0 } for key in STATIC_PATHS.keys() }
+
+    async def flush_path_queues(self):
+        endpoints = await self._path_queues.flush()
+        print(f'[Scraper]: flushing {len(endpoints)} paths')
+        for endpoint in endpoints:
+            await self._queue.put(endpoint)
+    
+    async def sort_path_queues(self):
+        scores = {}
+        for path in STATIC_PATHS.keys():
+            data = self._route_data[path]
+            info = data['added'] + 0.5*data['batched']
+            calls = data['calls']
+            scores[path] = 0 if calls == 0 else info/calls
+        print('[Scraper]: setting priorities to:', scores)
+        await self._path_queues.set_priority(scores)
+
 
     async def run(self):
         await self._sc.refresh_access_token()
-        for endpoint in self._seed:
-            await self._primary_queue.put(endpoint)
+        for seed in self._seed:
+            await self._queue.put(seed)
 
         print('[Scraper]: Starting Scraper...')
-        print('[Scraper]: Initial Queue Size:', self._secondary_queue.qsize())
+        print('[Scraper]: Initial Queue Size:', self._queue.qsize())
         start = time.time()
         workers = [asyncio.create_task(self.worker()) for _ in range(NUM_WORKERS)]
 
-        while not self._primary_queue.empty():
-            await self._primary_queue.join()
-            await self._secondary_queue.join()
+        while not self._path_queues.empty() or not self._queue.empty():
+            if self._queue.empty():
+                await self.flush_path_queues()
+            await self._queue.join()
         print('[Scraper]: Queue has no unfinished tasks. Cancelling workers...')
 
         for w in workers:
@@ -73,12 +92,7 @@ class Scraper:
                 return
     
     async def process_one(self):
-        processing_primary = not self._primary_queue.empty()
-        if processing_primary:
-            endpoint = await self._primary_queue.get()
-        else:
-            endpoint = await self._secondary_queue.get()
-
+        endpoint = await self._queue.get()
         try:
             if self._total < MAX_NUM_ARTISTS:
                 await self.process_endpoint(endpoint)
@@ -86,10 +100,12 @@ class Scraper:
             print(f'Error processing endpoint {endpoint}: {e}')
             traceback.print_exc()
         finally:
-            if processing_primary:
-                self._primary_queue.task_done()
-            else:
-                self._secondary_queue.task_done()
+            self._queue.task_done()
+            if self._total != 0:
+                if self._total % SCORE_UPDATE_RATE == 0:
+                    await self.sort_path_queues()
+                if self._total % FLUSH_RATE == 0:
+                    await self.flush_path_queues()
     
     async def process_endpoint(self, endpoint):
 
@@ -129,18 +145,18 @@ class Scraper:
         # handle response
         if res is None: # connection or other severe error
             # TODO: better handling? do we just requeue?
-            await self._secondary_queue.put(endpoint)
+            await self._queue.put(endpoint)
         elif res['status'] == STATUS_CODES['RATE_LIMITED']:
             print('[Rate Limit]: warning')
             self._rate_limit_hits += 1
             retry_after = res['data']['retry_after']
             await self._backoff_policy.set_retry_after(retry_after)
             await self._backoff_policy.incr_attempts()
-            await self._secondary_queue.put(endpoint)
+            await self._queue.put(endpoint)
         elif res['status'] == STATUS_CODES['OLD_ACCESS_TOKEN']:
             print("Refreshing access token...")
             await self._sc.refresh_access_token()
-            await self._secondary_queue.put(endpoint)
+            await self._queue.put(endpoint)
         elif res['status'] == STATUS_CODES['BAD_OAUTH']:
             print('Bad OAuth token')
         else: # success
@@ -205,7 +221,7 @@ class Scraper:
             v1_idx = next_str.index('v1')
             path = next_str[v1_idx+2:]
             # print('enqueuing next search', path)
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            await self._path_queues.put('search', { 'path': path, 'params': None })
         return [a0, b0]
 
     async def process_playlist(self, playlist):
@@ -216,7 +232,7 @@ class Scraper:
             next_str = playlist['next']
             v1_idx = next_str.index('v1')
             path = next_str[v1_idx+2:]
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            await self._path_queues.put('playlist', { 'path': path, 'params': None })
         return [a0 + a1, b0 + b1]
 
     async def process_category_playlists(self, playlists):
@@ -224,7 +240,7 @@ class Scraper:
             if playlist is None or await self._cache.exists(playlist['id']):
                 continue
             await self._cache.set(playlist['id'], b'1')
-            await self._secondary_queue.put({ 
+            await self._path_queues.put('playlist', { 
                 'path': f"/playlists/{playlist['id']}/tracks", 
                 'params': { 
                     'limit': 50,
@@ -235,14 +251,14 @@ class Scraper:
             next_str = playlists['next']
             v1_idx = next_str.index('v1')
             path = next_str[v1_idx+2:]
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            await self._path_queues.put('category_playlists',{ 'path': path, 'params': None })
 
     async def process_categories(self, categories):
         for category in categories['items']:
             if await self._cache.exists(category['id']):
                 continue
             await self._cache.set(category['id'], b'1')
-            await self._secondary_queue.put({ 
+            await self._path_queues.put('category_playlists', { 
                 'path': f"/browse/categories/{category['id']}/playlists", 
                 'params': { 'limit': 50 } 
             })
@@ -250,7 +266,7 @@ class Scraper:
             next_str = categories['next']
             v1_idx = next_str.index('v1')
             path = next_str[v1_idx+2:]
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            await self._path_queues.put('categories', { 'path': path, 'params': None })
 
     async def process_genres(self, genres, artist_id=None):
         for genre in genres:
@@ -259,8 +275,8 @@ class Scraper:
             params = {'seed_genres': genre, 'limit': 100}
             if artist_id is not None:
                 params['seed_artists'] = artist_id
-            await self._secondary_queue.put({ 'path': '/recommendations', 'params': params })
-            await self._secondary_queue.put({ 'path': '/search', 'params': { 
+            await self._path_queues.put('recommendations', { 'path': '/recommendations', 'params': params })
+            await self._path_queues.put('search', { 'path': '/search', 'params': { 
                 'q': 'genre:'+genre,
                 'type': 'artist',
                 'limit': 50 
@@ -299,7 +315,7 @@ class Scraper:
                 # print(f'Added {artist_id} to batch request')
                 if await self._batch_artist_req_builder.is_full():
                     # print("Batch request is full, enqueing batch request...")
-                    await self._primary_queue.put({
+                    await self._path_queues.put('artists', {
                         'path': '/artists',
                         'params': {'ids': await self._batch_artist_req_builder.build()}
                     })
@@ -312,7 +328,10 @@ class Scraper:
                 if self._total >= MAX_NUM_ARTISTS:
                     print('Reached max number of artists. Stopping...')
                     break
-                await self._secondary_queue.put({ 'path': f"/artists/{artist_id}/related-artists", 'params': None })
+                await self._path_queues.put('artist_related_artists', { 
+                    'path': f"/artists/{artist_id}/related-artists", 
+                    'params': None 
+                })
                 await self.process_genres(genres, artist_id)
         print(f'[ADDED]: {added_artists} [BATCHED]: {batched_artists}')
         return [added_artists, batched_artists]
