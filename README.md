@@ -83,5 +83,9 @@ and prioritize some endpoints over others. Additionally I read the docs for each
 and remove unnecessary fields when possible. I also tested different numbers of workers. For my machine, 20 workers was best,
 but this may vary depending on cores and network speed which is why I included a command line option for number of workers.
 
+![Data](data.png)
+
+_data collected on workers_
+
 I think next steps would be to replace the queue with a priority queue that prioritized endpoints with high information/call and
 update the information/call for each endpoint type dynamically as the program ran.
