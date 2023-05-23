@@ -2,24 +2,35 @@ import base64
 import aiohttp
 import json
 
-BASE = 'https://api.spotify.com/v1'
-PATHS = {
-    'genre_seeds': '/recommendations/available-genre-seeds',
-    'artists': '/artists',
-    'recommendations': '/recommendations',
-    'albums': '/albums',
-    'categories': '/browse/categories',
-    'category_playlists': '/browse/categories/',
-    'playlist': '/playlists/',
-    'artist_related_artists': '/artists/',
-    'search': '/search',
-}
-STATUS_CODES = {
-    'OK': 200,
-    'RATE_LIMITED': 429,
-    'BAD_OAUTH': 403,
-    'OLD_ACCESS_TOKEN': 401,
-}
+class SpotifyAPIConstants:
+    BASE = 'https://api.spotify.com/v1'
+    TOKEN_URL = 'https://accounts.spotify.com/api/token' 
+    GENRE_SEEDS = 'genre_seeds'
+    GENRE_SEEDS_PATH = '/recommendations/available-genre-seeds'
+    ARTISTS = 'artists'
+    ARTISTS_PATH = '/artists'
+    RECOMMENDATIONS = 'recommendations'
+    RECOMMENDATIONS_PATH = '/recommendations'
+    ALBUMS = 'albums'
+    ALBUMS_PATH = '/albums'
+    CATEGORIES = 'categories'
+    CATEGORIES_PATH = '/browse/categories'
+    CATEGORY_PLAYLISTS = 'category_playlists'
+    CATEGORY_PLAYLISTS_PATH = '/browse/categories/'
+    PLAYLIST = 'playlist'
+    PLAYLIST_PATH = '/playlists/' 
+    ARTIST_RELATED_ARTISTS = 'artist_related_artists'
+    ARTIST_RELATED_ARTISTS_PATH = '/artists/'
+    SEARCH = 'search'
+    SEARCH_PATH = '/search'
+    RATE_LIMIT_CODE = 429
+    OK_CODE = 200
+    BAD_OAUTH_CODE = 403
+    EXPIRED_TOKEN_CODE = 401
+    PATHS = [ 
+        GENRE_SEEDS, ARTISTS, RECOMMENDATIONS, ALBUMS, CATEGORIES,
+        CATEGORY_PLAYLISTS, PLAYLIST, ARTIST_RELATED_ARTISTS, SEARCH
+    ]
 
 class SpotifyClient:
     def __init__(self, session: aiohttp.ClientSession):
@@ -35,10 +46,10 @@ class SpotifyClient:
             async with self._session.request(method, url, data=data, headers=headers, params=params) as response:
                 status = response.status
                 data = {} if response.content_type != 'application/json' else await response.json()
-                if status != STATUS_CODES['OK']:
+                if status != SpotifyAPIConstants.OK_CODE:
                     error = data.get('error', { 'message': 'No error message provided'})
                     print(f"Failed to fetch {url}. Error {status}: {error['message']}")
-                if status == STATUS_CODES['RATE_LIMITED']:
+                if status == SpotifyAPIConstants.RATE_LIMIT_CODE:
                     retry_after = response.headers.get('Retry-After')
                     if retry_after is not None:
                         data['retry_after'] = float(retry_after)
@@ -49,15 +60,12 @@ class SpotifyClient:
 
     async def refresh_access_token(self):
         auth_header = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode()).decode()
-        data = {
-            'grant_type': 'client_credentials'
-        }
+        data = { 'grant_type': 'client_credentials' }
         headers = {
             'Authorization': f"Basic {auth_header}",
             'Content-Type': 'application/x-www-form-urlencoded'
         }
-        url = 'https://accounts.spotify.com/api/token' 
-        res = await self.fetch(url, 'POST', data, headers)
+        res = await self.fetch(SpotifyAPIConstants.TOKEN_URL, 'POST', data, headers)
         if res is None:
             raise Exception("Failed to refresh access token")
         self.access_token = res['data']['access_token']

@@ -2,6 +2,9 @@ import redis
 import asyncio
 
 class Cache:
+    BATCHED = b'1'
+    ADDED = b'2'
+
     def __init__(self, fresh=False):
         try:
             self.cache = redis.Redis(host='localhost', port=6379, db=0)
