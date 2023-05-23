@@ -3,7 +3,7 @@ import aiohttp
 import json
 
 BASE = 'https://api.spotify.com/v1'
-STATIC_PATHS = {
+PATHS = {
     'genre_seeds': '/recommendations/available-genre-seeds',
     'artists': '/artists',
     'recommendations': '/recommendations',

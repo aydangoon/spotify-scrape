@@ -9,7 +9,7 @@ from cache import Cache
 from artists_writer import ArtistsWriter
 from backoff_policy import BackoffPolicy
 from batch_req_builder import BatchReqBuilder
-from spotify_client import SpotifyClient, BASE, STATIC_PATHS, STATUS_CODES
+from spotify_client import SpotifyClient, BASE, PATHS, STATUS_CODES
 
 RATE_LIMIIT_SAFETY = 5 # temp. if we get this number of 429s, just stop
 
@@ -21,7 +21,6 @@ class Scraper:
         self._sc = SpotifyClient(session)
         # queue for batch artist requests. These take priority over other requests
         self._primary_queue = asyncio.Queue()
-        # queue for all other requests
         self._secondary_queue = asyncio.Queue()
         self._seed = seed
         self._total = 0
@@ -29,7 +28,7 @@ class Scraper:
         self._batch_artist_req_builder = BatchReqBuilder(size=50)
 
         # data collection
-        self._route_data = { key: { 'time': 0, 'calls': 0, 'batched': 0, 'added': 0 }for key in STATIC_PATHS.keys() }
+        self._path_data = { key: { 'time': 0, 'calls': 0, 'batched': 0, 'added': 0 }for key in PATHS.keys() }
 
     async def run(self):
         await self._sc.refresh_access_token()
@@ -50,19 +49,18 @@ class Scraper:
             w.cancel()
         
         print(f'[Scraper]: finished in {time.time() - start} seconds')
-        print('[Scraper] Route Stats:')
-        for key, val in self._route_data.items():
+        print('[Scraper] Path Stats:')
+        for key, val in self._path_data.items():
+            total_time, calls, batched, added = val['time'], val['calls'], val['batched'], val['added']
             print("======================================================")
             print(key+":")
-            time_per_call = "N/A" if val['calls'] == 0 else val['time']/val['calls']
-            info_per_call = "N/A" if val['calls'] == 0 else (val['added'] + 0.5*val['batched'])/val['calls']
-            info_per_sec = "N/A" if time_per_call == 0 or time_per_call == "N/A" or info_per_call=="N/A" else info_per_call/time_per_call
-            score = "N/A" if val['calls'] == 0 or val['time'] == 0 else (val['added'] + 0.5*val['batched'])/(val['time']*val['calls'])
-            print(f"\tTotal Time: {val['time']}")
+            time_per_call = 0 if calls == 0 else total_time/calls
+            info_per_call = 0 if calls == 0 else (added + 0.5*batched)/calls
+            info_per_sec = 0 if calls == 0 else info_per_call/time_per_call
+            print(f"\tTotal Time: {total_time}")
             print(f"\tTime per call: {time_per_call}")
             print(f"\tInfo per call: {info_per_call}")
             print(f"\tInfo per second: {info_per_sec}")
-            print(f"\tScore: {score}")
             print("======================================================")
 
     async def worker(self):
@@ -78,7 +76,6 @@ class Scraper:
             endpoint = await self._primary_queue.get()
         else:
             endpoint = await self._secondary_queue.get()
-
         try:
             if self._total < MAX_NUM_ARTISTS:
                 await self.process_endpoint(endpoint)
@@ -92,8 +89,6 @@ class Scraper:
                 self._secondary_queue.task_done()
     
     async def process_endpoint(self, endpoint):
-
-        # print('Processing:', endpoint)
 
         if self._rate_limit_hits >= RATE_LIMIIT_SAFETY:
             print('[Rate Limit]: safety hit. Stopping...')
@@ -118,17 +113,12 @@ class Scraper:
         call_time = time.time() - start_time
 
         endpoint_str = endpoint['path'] + "| params: " + str(endpoint['params'])
-        # route cache check
-        # if await self._cache.exists(endpoint_str):
-        #     print('VERY BAD: send duplicate request')
-        # await self._cache.set(endpoint_str, b'1')
         endpoint_str_pretty = endpoint_str[:100]+"..." if len(endpoint_str) > 100 else endpoint_str
 
         print(f'Response: {"XXX" if res is None else res["status"]} | Endpoint: {endpoint_str_pretty}')
 
         # handle response
         if res is None: # connection or other severe error
-            # TODO: better handling? do we just requeue?
             await self._secondary_queue.put(endpoint)
         elif res['status'] == STATUS_CODES['RATE_LIMITED']:
             print('[Rate Limit]: warning')
@@ -144,59 +134,59 @@ class Scraper:
         elif res['status'] == STATUS_CODES['BAD_OAUTH']:
             print('Bad OAuth token')
         else: # success
-            await self.process_valid_endpoint(endpoint, res['data'], call_time)
+            await self.process_data(endpoint, res['data'], call_time)
     
-    async def process_valid_endpoint(self, endpoint, data, call_time):
+    async def process_data(self, endpoint, data, call_time):
         path = endpoint['path']
         [added, batched] = [0, 0]
-        if path.startswith(STATIC_PATHS['genre_seeds']):
+        if path.startswith(PATHS['genre_seeds']):
             await self.process_genres(data['genres'])
-            route = 'genre_seeds'
-        elif path.startswith(STATIC_PATHS['recommendations']):
+            path = 'genre_seeds'
+        elif path.startswith(PATHS['recommendations']):
             [a0, b0] = await self.process_artists([artist for track in data['tracks'] for artist in track["artists"]])
             [a1, b1] = await self.process_albums([track['album'] for track in data['tracks']])
             added += a0 + a1
             batched += b0 + b1
-            route = 'recommendations'
-        elif path.startswith(STATIC_PATHS['artist_related_artists']):
+            path = 'recommendations'
+        elif path.startswith(PATHS['artist_related_artists']):
             [a0, b0] = await self.process_artists(data['artists'])
             added += a0
             batched += b0
-            route = 'artist_related_artists'
-        elif path.startswith(STATIC_PATHS['artists']):
+            path = 'artist_related_artists'
+        elif path.startswith(PATHS['artists']):
             [a0, b0] = await self.process_artists(data['artists'])
             added += a0
             batched += b0
-            route = 'artists'
-        elif path.startswith(STATIC_PATHS['albums']):
+            path = 'artists'
+        elif path.startswith(PATHS['albums']):
             [a0, b0] = await self.process_albums(data['albums'])
             added += a0
             batched += b0
-            route = 'albums'
-        elif path.startswith(STATIC_PATHS['category_playlists']):
+            path = 'albums'
+        elif path.startswith(PATHS['category_playlists']):
             print("Processing category playlists...")
             await self.process_category_playlists(data['playlists'])
-            route = 'category_playlists'
-        elif path.startswith(STATIC_PATHS['categories']):
+            path = 'category_playlists'
+        elif path.startswith(PATHS['categories']):
             print("Processing categories...")
             await self.process_categories(data['categories'])
-            route = 'categories'
-        elif path.startswith(STATIC_PATHS['playlist']):
+            path = 'categories'
+        elif path.startswith(PATHS['playlist']):
             print("Processing playlist...")
             [a0, b0] = await self.process_playlist(data)
             added += a0
             batched += b0
-            route = 'playlist'
-        elif path.startswith(STATIC_PATHS['search']):
+            path = 'playlist'
+        elif path.startswith(PATHS['search']):
             [a0, b0] = await self.process_search(data.get('artists', []))
             added += a0
             batched += b0
-            route = 'search'
+            path = 'search'
 
-        self._route_data[route]['time'] += call_time
-        self._route_data[route]['calls'] += 1
-        self._route_data[route]['added'] += added
-        self._route_data[route]['batched'] += batched
+        self._path_data[path]['time'] += call_time
+        self._path_data[path]['calls'] += 1
+        self._path_data[path]['added'] += added
+        self._path_data[path]['batched'] += batched
     
     async def process_search(self, artists):
         [a0, b0] = await self.process_artists(artists['items'])
@@ -204,7 +194,6 @@ class Scraper:
             next_str = artists['next']
             v1_idx = next_str.index('v1')
             path = next_str[v1_idx+2:]
-            # print('enqueuing next search', path)
             await self._secondary_queue.put({ 'path': path, 'params': None })
         return [a0, b0]
 
@@ -212,7 +201,7 @@ class Scraper:
         tracks = [item['track'] for item in playlist['items'] if item['track']['type'] == 'track']
         [a0, b0] = await self.process_artists([artist for track in tracks for artist in track['artists']])
         [a1, b1] = await self.process_albums([track['album'] for track in tracks])
-        if 'next' in playlist and playlist['next'] is not None:
+        if playlist.get('next', None) is not None:
             next_str = playlist['next']
             v1_idx = next_str.index('v1')
             path = next_str[v1_idx+2:]
@@ -231,7 +220,7 @@ class Scraper:
                     'fields': 'next,items(track(type,album(id),artists(id)))'
                 } 
             })
-        if 'next' in playlists and playlists['next'] is not None:
+        if playlists.get('next', None) is not None:
             next_str = playlists['next']
             v1_idx = next_str.index('v1')
             path = next_str[v1_idx+2:]
@@ -296,9 +285,7 @@ class Scraper:
                 await self._cache.set(artist_id, b'1')
                 await self._batch_artist_req_builder.add(artist_id)
                 batched_artists += 1
-                # print(f'Added {artist_id} to batch request')
                 if await self._batch_artist_req_builder.is_full():
-                    # print("Batch request is full, enqueing batch request...")
                     await self._primary_queue.put({
                         'path': '/artists',
                         'params': {'ids': await self._batch_artist_req_builder.build()}
@@ -307,7 +294,6 @@ class Scraper:
                 await self._artists_writer.add(id=artist_id, name=name, popularity=popularity, genres=genres)
                 added_artists += 1 
                 await self._cache.set(artist_id, b'2')
-                # print(f'Added {artist_id} to artists.csv')
                 self._total += 1
                 if self._total >= MAX_NUM_ARTISTS:
                     print('Reached max number of artists. Stopping...')
@@ -328,15 +314,10 @@ async def main():
     DEBUG = bool(args.debug)
     FRESH = bool(args.fresh)
     MAX_NUM_ARTISTS = args.max_num_artists or 100
-    if not args.num_workers:
-        if MAX_NUM_ARTISTS <= 200:
-            default_num_workers = 10
-        else:
-            default_num_workers = 20
-    NUM_WORKERS = args.num_workers or default_num_workers
+    NUM_WORKERS = args.num_workers or 20
     print(f"Debug mode: {DEBUG}")
 
-    # Seeds for testing
+    # various seeds for testing
     SEVERAL_ARTISTS = {
         'path': '/artists',
         'params': {
