@@ -296,7 +296,7 @@ async def main():
     global DEBUG, MAX_NUM_ARTISTS, FRESH, NUM_WORKERS
     DEBUG = bool(args.debug)
     FRESH = bool(args.fresh)
-    MAX_NUM_ARTISTS = args.max_num_artists or 11_000_000 # spotify has ~11M artists as of 2023
+    MAX_NUM_ARTISTS = args.max_num_artists or 12_000_000 # spotify has ~11M artists as of 2023
     NUM_WORKERS = args.num_workers or 20 # best parallelism found while testing
     print(f"Debug mode: {DEBUG}")
 
