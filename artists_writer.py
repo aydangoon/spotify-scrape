@@ -17,7 +17,7 @@ class ArtistsWriter:
                     pass
             except FileNotFoundError:
                 self._write_header()
-    
+
     async def add(self, id: str, name: str, popularity: int, genres: List[str]):
         async with self._lock:
             self.artists[id] = [name, popularity, genres]
@@ -28,10 +28,12 @@ class ArtistsWriter:
     async def _write_to_file(self):
         with open(self.FILENAME, 'a') as f:
             items = self.artists.items()
-            to_write = '\n'.join([f"{id},{name},{popularity},{';'.join(genres)}" for id, [name, popularity, genres] in items])
+            to_write = "\n".join([
+                f"{id},{name},{popularity},{';'.join(genres)}"
+                for id, [name, popularity, genres] in items
+            ])
             f.write(to_write + "\n")
-    
+
     def _write_header(self):
         with open(self.FILENAME, 'w') as f:
             f.write('id,name,popularity,genres\n')
-

@@ -13,29 +13,35 @@ from spotify_client import SpotifyClient, SpotifyAPIConstants
 
 class Scraper:
     def __init__(self, seed: List[str], session: aiohttp.ClientSession):
-        self._cache = Cache(fresh=FRESH)
-        self._backoff_policy = BackoffPolicy()
+        self.cache = Cache(fresh=FRESH)
+        self.backoff_policy = BackoffPolicy()
         self._artists_writer = ArtistsWriter(fresh=FRESH)
-        self._sc = SpotifyClient(session)
-        self._primary_queue = asyncio.Queue() # for batch artist requests, these take priority over other requests
-        self._secondary_queue = asyncio.Queue()
-        self._seed = seed
-        self._total = 0
-        self._rate_limit_hits = 0
-        self._batch_artist_req_builder = BatchReqBuilder(size=50)
-        self._path_data = { key: { 'time': 0, 'calls': 0, 'batched': 0, 'added': 0 } for key in SpotifyAPIConstants.PATHS } # data collection
+        self.spotify_client = SpotifyClient(session)
+        self.primary_queue = asyncio.Queue() # for batch artist requests, these take priority over other requests
+        self.secondary_queue = asyncio.Queue()
+        self.seed = seed
+        self.total = 0
+        self.artists_batch_builder = BatchReqBuilder(size=50)
+        self.metrics = { # data collection
+            key: { 
+                'time': 0,
+                'calls': 0,
+                'batched': 0,
+                'added': 0
+            } for key in SpotifyAPIConstants.PATHS 
+        }
 
     async def run(self):
-        await self._sc.refresh_access_token()
-        for endpoint in self._seed:
-            await self._primary_queue.put(endpoint)
+        await self.spotify_client.refresh_access_token()
+        for endpoint in self.seed:
+            await self.primary_queue.put(endpoint)
 
         print('[Scraper]: Starting Scraper...')
-        print('[Scraper]: Initial Queue Size:', self._secondary_queue.qsize())
+        print('[Scraper]: Initial Queue Size:', self.secondary_queue.qsize())
         start = time.time()
         workers = [asyncio.create_task(self.worker()) for _ in range(NUM_WORKERS)]
 
-        while not self._primary_queue.empty() or not self._secondary_queue.empty():
+        while not self.primary_queue.empty() or not self.secondary_queue.empty():
             await asyncio.sleep(5)
         print('[Scraper]: Queue has no unfinished tasks. Cancelling workers...')
 
@@ -45,7 +51,7 @@ class Scraper:
         print(f'[Scraper]: finished in {time.time() - start} seconds')
         if DEBUG:
             print('[Scraper] Path Stats:')
-            for key, val in self._path_data.items():
+            for key, val in self.metrics.items():
                 total_time, calls, batched, added = val['time'], val['calls'], val['batched'], val['added']
                 print("======================================================")
                 print(key+":")
@@ -66,29 +72,29 @@ class Scraper:
                 return
     
     async def process_one(self):
-        processing_primary = not self._primary_queue.empty()
+        processing_primary = not self.primary_queue.empty()
         if processing_primary:
-            endpoint = await self._primary_queue.get()
+            endpoint = await self.primary_queue.get()
         else:
-            endpoint = await self._secondary_queue.get()
+            endpoint = await self.secondary_queue.get()
         try:
-            if self._total < MAX_NUM_ARTISTS:
+            if self.total < MAX_NUM_ARTISTS:
                 await self.process_endpoint(endpoint)
         except Exception as e:
             print(f'Error processing endpoint {endpoint}: {e}')
             traceback.print_exc()
         finally:
             if processing_primary:
-                self._primary_queue.task_done()
+                self.primary_queue.task_done()
             else:
-                self._secondary_queue.task_done()
+                self.secondary_queue.task_done()
     
     async def process_endpoint(self, endpoint):
 
         # attempt to fetch
-        headers = {'Authorization': f"Bearer {self._sc.access_token}"}
+        headers = {'Authorization': f"Bearer {self.spotify_client.access_token}"}
         start_time = time.time()
-        res = await self._sc.fetch(
+        res = await self.spotify_client.fetch(
             url=SpotifyAPIConstants.BASE+endpoint['path'],
             method='GET',
             data=None,
@@ -104,23 +110,22 @@ class Scraper:
 
         # handle response
         if res is None: # connection or other severe error
-            await self._secondary_queue.put(endpoint)
+            await self.secondary_queue.put(endpoint)
         elif res['status'] == SpotifyAPIConstants.RATE_LIMIT_CODE:
             debug('[Rate Limit]: warning')
-            self._rate_limit_hits += 1
             retry_after = res['data']['retry_after']
-            await self._backoff_policy.set_retry_after(retry_after)
-            await self._backoff_policy.incr_attempts()
+            await self.backoff_policy.set_retry_after(retry_after)
+            await self.backoff_policy.incr_attempts()
             # worker waits rate limit before retrying
-            wait_sec = await self._backoff_policy.get_backoff()
+            wait_sec = await self.backoff_policy.get_backoff()
             if wait_sec > 0:
                 debug(f'[Rate Limit]: Waiting {wait_sec} seconds...')
                 await asyncio.sleep(wait_sec)
-            await self._secondary_queue.put(endpoint)
+            await self.secondary_queue.put(endpoint)
         elif res['status'] == SpotifyAPIConstants.EXPIRED_TOKEN_CODE:
             debug("Refreshing access token...")
-            await self._sc.refresh_access_token()
-            await self._secondary_queue.put(endpoint)
+            await self.spotify_client.refresh_access_token()
+            await self.secondary_queue.put(endpoint)
         elif res['status'] == SpotifyAPIConstants.BAD_OAUTH_CODE:
             debug('Bad OAuth token')
         else: # success
@@ -157,10 +162,10 @@ class Scraper:
             added, batched = await self.process_search(data.get('artists', []))
             data_path = SpotifyAPIConstants.SEARCH
 
-        self._path_data[data_path]['time'] += call_time
-        self._path_data[data_path]['calls'] += 1
-        self._path_data[data_path]['added'] += added
-        self._path_data[data_path]['batched'] += batched
+        self.metrics[data_path]['time'] += call_time
+        self.metrics[data_path]['calls'] += 1
+        self.metrics[data_path]['added'] += added
+        self.metrics[data_path]['batched'] += batched
     
     async def process_tracks(self, tracks):
         artists = [artist for track in tracks for artist in track["artists"]]
@@ -172,28 +177,24 @@ class Scraper:
     async def process_search(self, artists):
         [added, batched] = await self.process_artists(artists['items'])
         if artists.get('next', None) is not None:
-            next_str = artists['next']
-            v1_idx = next_str.index('v1')
-            path = next_str[v1_idx+2:]
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            path = get_next_path(artists['next'])
+            await self.secondary_queue.put({ 'path': path, 'params': None })
         return [added, batched]
 
     async def process_playlist(self, playlist):
         tracks = [item['track'] for item in playlist['items'] if item['track']['type'] == 'track']
         [added, batched] = await self.process_tracks(tracks)
         if playlist.get('next', None) is not None:
-            next_str = playlist['next']
-            v1_idx = next_str.index('v1')
-            path = next_str[v1_idx+2:]
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            path = get_next_path(playlist['next'])
+            await self.secondary_queue.put({ 'path': path, 'params': None })
         return [added, batched]
 
     async def process_category_playlists(self, playlists):
         for playlist in playlists['items']:
-            if playlist is None or await self._cache.exists(playlist['id']):
+            if playlist is None or await self.cache.exists(playlist['id']):
                 continue
-            await self._cache.set(playlist['id'], Cache.ADDED)
-            await self._secondary_queue.put({ 
+            await self.cache.set(playlist['id'], Cache.ADDED)
+            await self.secondary_queue.put({ 
                 'path': f"/playlists/{playlist['id']}/tracks", 
                 'params': { 
                     'limit': 50,
@@ -201,46 +202,42 @@ class Scraper:
                 } 
             })
         if playlists.get('next', None) is not None:
-            next_str = playlists['next']
-            v1_idx = next_str.index('v1')
-            path = next_str[v1_idx+2:]
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            path = get_next_path(playlists['next'])
+            await self.secondary_queue.put({ 'path': path, 'params': None })
 
     async def process_categories(self, categories):
         for category in categories['items']:
-            if await self._cache.exists(category['id']):
+            if await self.cache.exists(category['id']):
                 continue
-            await self._cache.set(category['id'], Cache.ADDED)
-            await self._secondary_queue.put({ 
+            await self.cache.set(category['id'], Cache.ADDED)
+            await self.secondary_queue.put({ 
                 'path': f"/browse/categories/{category['id']}/playlists", 
                 'params': { 'limit': 50 } 
             })
         if 'next' in categories and categories['next'] is not None:
-            next_str = categories['next']
-            v1_idx = next_str.index('v1')
-            path = next_str[v1_idx+2:]
-            await self._secondary_queue.put({ 'path': path, 'params': None })
+            path = get_next_path(categories['next'])
+            await self.secondary_queue.put({ 'path': path, 'params': None })
 
     async def process_genres(self, genres, artist_id=None):
         for genre in genres:
-            if await self._cache.exists(genre):
+            if await self.cache.exists(genre):
                 continue
             params = {'seed_genres': genre, 'limit': 100}
             if artist_id is not None:
                 params['seed_artists'] = artist_id
-            await self._secondary_queue.put({ 'path': '/recommendations', 'params': params })
-            await self._primary_queue.put({ 'path': '/search', 'params': { 
+            await self.secondary_queue.put({ 'path': '/recommendations', 'params': params })
+            await self.primary_queue.put({ 'path': '/search', 'params': { 
                 'q': f'genre:{genre}',
                 'type': 'artist',
                 'limit': 50 
             }})
-            await self._cache.set(genre, Cache.ADDED)
+            await self.cache.set(genre, Cache.ADDED)
     
     async def process_albums(self, albums):
         for album in albums:
-            if await self._cache.exists(album['id']):
+            if await self.cache.exists(album['id']):
                 continue
-            await self._cache.set(album['id'], Cache.ADDED)
+            await self.cache.set(album['id'], Cache.ADDED)
         return await self.process_artists([artist for album in albums for artist in album.get('artists', [])])
 
     async def process_artists(self, artists):
@@ -248,38 +245,42 @@ class Scraper:
         added = 0
         batched = 0
         for artist in artists:
-            if self._total >= MAX_NUM_ARTISTS: 
+            if self.total >= MAX_NUM_ARTISTS: 
                 break
             artist_id = artist.get('id')
             if artist_id is None:
                 continue
-            cache_val = await self._cache.get(artist_id)
+            cache_val = await self.cache.get(artist_id)
             if cache_val == Cache.ADDED:
                 continue
 
             genres, popularity, name = artist.get('genres'), artist.get('popularity'), artist.get('name')
             missing_data = genres is None or popularity is None or name is None
             if missing_data and cache_val == None:
-                await self._cache.set(artist_id, Cache.BATCHED)
-                await self._batch_artist_req_builder.add(artist_id)
+                await self.cache.set(artist_id, Cache.BATCHED)
+                await self.artists_batch_builder.add(artist_id)
                 batched += 1
-                if await self._batch_artist_req_builder.is_full():
-                    await self._primary_queue.put({
+                if await self.artists_batch_builder.is_full():
+                    await self.primary_queue.put({
                         'path': '/artists',
-                        'params': {'ids': await self._batch_artist_req_builder.build()}
+                        'params': {'ids': await self.artists_batch_builder.build()}
                     })
             elif not missing_data:
                 await self._artists_writer.add(id=artist_id, name=name, popularity=popularity, genres=genres)
                 added += 1 
-                await self._cache.set(artist_id, Cache.ADDED)
-                self._total += 1
-                if self._total >= MAX_NUM_ARTISTS:
+                await self.cache.set(artist_id, Cache.ADDED)
+                self.total += 1
+                if self.total >= MAX_NUM_ARTISTS:
                     debug('Reached max number of artists. Stopping...')
                     break
-                await self._secondary_queue.put({ 'path': f"/artists/{artist_id}/related-artists", 'params': None })
+                await self.secondary_queue.put({ 'path': f"/artists/{artist_id}/related-artists", 'params': None })
                 await self.process_genres(genres, artist_id)
         debug(f'[ADDED]: {added} [BATCHED]: {batched}')
         return [added, batched]
+
+def get_next_path(next_str: str):
+    v1_idx = next_str.index('v1')
+    return next_str[v1_idx+2:]
 
 def debug(s: str):
     if DEBUG:
@@ -299,25 +300,8 @@ async def main():
     NUM_WORKERS = args.num_workers or 20 # best parallelism found while testing
     print(f"Debug mode: {DEBUG}")
 
-    # various seeds for testing
-    SEVERAL_ARTISTS = {
-        'path': '/artists',
-        'params': {
-            'ids': '2CIMQHirSU0MQqyYHq0eOx,57dN52uHvrHOxijzpIgu3E,1vCWHaC5f2uS3yhpwWbIA6'
-        }
-    }
-    RELATED_ARTISTS = { 'path':'/artists/0TnOYISbd1XYRBk9myaseg/related-artists', 'params': None }
-    SEVERAL_ALBUMS = {
-        'path': '/albums', 
-        'params':{
-            'ids':'382ObEPsp2rxGrnsizN5TX,1A2GTWGtFfWp7KSQTwWOyo,2noRn2Aes5aoNVsU6iWThc'
-        }
-    }
     GENRE_SEEDS = { 'path': '/recommendations/available-genre-seeds', 'params': None }
-    PLAYLIST = { 'path': '/playlists/3cEYpjA9oz9GiPac4AsH4n/tracks', 'params': None }
-    CATEGORY_PLAYLISTS = { 'path' : '/browse/categories/dinner/playlists', 'params': None}
     CATEGORY = { 'path': '/browse/categories', 'params': None}
-    SEARCH = { 'path': '/search?query=genre%3Arock&type=artist&offset=20&limit=50', 'params': None }
 
     async with aiohttp.ClientSession() as session:
         scraper = Scraper(seed=[GENRE_SEEDS, CATEGORY], session=session)

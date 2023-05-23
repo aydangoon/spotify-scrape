@@ -45,7 +45,14 @@ class SpotifyClient:
 
     async def fetch(self, url, method, data, headers, params=None):
         try: 
-            async with self._session.request(method, url, data=data, headers=headers, params=params, timeout=self._timeout) as response:
+            async with self._session.request(
+                method, 
+                url, 
+                data=data, 
+                headers=headers, 
+                params=params, 
+                timeout=self._timeout
+            ) as response:
                 status = response.status
                 data = {} if response.content_type != 'application/json' else await response.json()
                 if status != SpotifyAPIConstants.OK_CODE:
