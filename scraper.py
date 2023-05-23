@@ -38,11 +38,8 @@ class Scraper:
         workers = [asyncio.create_task(self.worker()) for _ in range(NUM_WORKERS)]
 
         while not self._primary_queue.empty():
-            print("HERE")
             await self._primary_queue.join()
-            print("THERE")
             await self._secondary_queue.join()
-            print("FROG")
         print('[Scraper]: Queue has no unfinished tasks. Cancelling workers...')
 
         for w in workers:
@@ -88,8 +85,6 @@ class Scraper:
                 self._primary_queue.task_done()
             else:
                 self._secondary_queue.task_done()
-            print(f"[Primary]: {self._primary_queue.qsize()} | [Secondary]: {self._secondary_queue.qsize()}")
-            print(f"[Primary Empty]: {self._primary_queue.empty()} | [Secondary Empty]: {self._secondary_queue.empty()}")
     
     async def process_endpoint(self, endpoint):
 
