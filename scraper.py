@@ -11,8 +11,6 @@ from backoff_policy import BackoffPolicy
 from batch_req_builder import BatchReqBuilder
 from spotify_client import SpotifyClient, SpotifyAPIConstants
 
-RATE_LIMIIT_SAFETY = 5 # temp. if we get this number of 429s, just stop
-
 class Scraper:
     def __init__(self, seed: List[str], session: aiohttp.ClientSession):
         self._cache = Cache(fresh=FRESH)
@@ -37,9 +35,8 @@ class Scraper:
         start = time.time()
         workers = [asyncio.create_task(self.worker()) for _ in range(NUM_WORKERS)]
 
-        while not self._primary_queue.empty():
-            await self._primary_queue.join()
-            await self._secondary_queue.join()
+        while not self._primary_queue.empty() or not self._secondary_queue.empty():
+            await asyncio.sleep(5)
         print('[Scraper]: Queue has no unfinished tasks. Cancelling workers...')
 
         for w in workers:
@@ -88,16 +85,6 @@ class Scraper:
     
     async def process_endpoint(self, endpoint):
 
-        if self._rate_limit_hits >= RATE_LIMIIT_SAFETY:
-            debug('[Rate Limit]: safety hit. Stopping...')
-            return
-        
-        # rate limit
-        wait_sec = await self._backoff_policy.get_backoff()
-        if wait_sec > 0:
-            debug(f'[Rate Limit]: Waiting {wait_sec} seconds...')
-            await asyncio.sleep(wait_sec)
-        
         # attempt to fetch
         headers = {'Authorization': f"Bearer {self._sc.access_token}"}
         start_time = time.time()
@@ -124,6 +111,11 @@ class Scraper:
             retry_after = res['data']['retry_after']
             await self._backoff_policy.set_retry_after(retry_after)
             await self._backoff_policy.incr_attempts()
+            # worker waits rate limit before retrying
+            wait_sec = await self._backoff_policy.get_backoff()
+            if wait_sec > 0:
+                debug(f'[Rate Limit]: Waiting {wait_sec} seconds...')
+                await asyncio.sleep(wait_sec)
             await self._secondary_queue.put(endpoint)
         elif res['status'] == SpotifyAPIConstants.EXPIRED_TOKEN_CODE:
             debug("Refreshing access token...")
@@ -237,7 +229,7 @@ class Scraper:
             if artist_id is not None:
                 params['seed_artists'] = artist_id
             await self._secondary_queue.put({ 'path': '/recommendations', 'params': params })
-            await self._secondary_queue.put({ 'path': '/search', 'params': { 
+            await self._primary_queue.put({ 'path': '/search', 'params': { 
                 'q': f'genre:{genre}',
                 'type': 'artist',
                 'limit': 50 

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import aiohttp
 import json
@@ -36,6 +37,7 @@ class SpotifyClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.access_token = None
         self._session = session
+        self._timeout = aiohttp.ClientTimeout(total=60)
         with open('key.json') as f:
             data = json.load(f)
             self._client_id = data['client_id']
@@ -43,7 +45,7 @@ class SpotifyClient:
 
     async def fetch(self, url, method, data, headers, params=None):
         try: 
-            async with self._session.request(method, url, data=data, headers=headers, params=params) as response:
+            async with self._session.request(method, url, data=data, headers=headers, params=params, timeout=self._timeout) as response:
                 status = response.status
                 data = {} if response.content_type != 'application/json' else await response.json()
                 if status != SpotifyAPIConstants.OK_CODE:
@@ -54,7 +56,7 @@ class SpotifyClient:
                     if retry_after is not None:
                         data['retry_after'] = float(retry_after)
                 return { 'status': status, 'data': data }
-        except aiohttp.ClientError as e:
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
             print(f"An error occurred during the request: {str(e)}")
             return None
 
